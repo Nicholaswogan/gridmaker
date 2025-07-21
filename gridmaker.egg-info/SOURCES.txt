@@ -1,8 +1,0 @@
-pyproject.toml
-gridmaker/__init__.py
-gridmaker/gridutils.py
-gridmaker.egg-info/PKG-INFO
-gridmaker.egg-info/SOURCES.txt
-gridmaker.egg-info/dependency_links.txt
-gridmaker.egg-info/requires.txt
-gridmaker.egg-info/top_level.txt
