@@ -247,7 +247,7 @@ class GridInterpolator():
             for i,r in enumerate(self.results):
                 val[i] = r[key][j]
             if logspace:
-                val = np.log10(np.maximum(val,2e-38))
+                val = np.log10(np.maximum(val, 1e-9))
             interps.append(val.reshape(self.gridshape))
 
         vlist = np.asarray(interps)
@@ -293,7 +293,7 @@ class GridInterpolator():
             val[i] = r[key]
 
         if logspace:
-            val = np.log10(np.maximum(val,2e-38))
+            val = np.log10(np.maximum(val, 1e-9))
         interp = interpolate.RegularGridInterpolator(self.gridvals, val.reshape(self.gridshape))
 
         def interp_val(vals):
