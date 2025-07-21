@@ -2,23 +2,22 @@ from threadpoolctl import threadpool_limits
 _ = threadpool_limits(limits=1) # set threads to 1
 
 import numpy as np
-from gridutils import make_grid
-
-# Only stuff below here needs to change
+from gridmaker import make_grid
 
 def model(y):
-    a, b = y
+    x1, x2, x3 = y
 
-    c = 0.0
-    for i in range(1_000_000):
-        c += 1
+    res = np.empty(100)
+    for i in range(len(res)):
+        res[i] = np.sin(np.pi * x1 / 2) * np.exp(x2 / 2) + x3 + i
 
-    return {'a': a/2, 'b': np.array([b*2])}
+    return {'res': res.astype(np.float32), 'x1': x1+x2+x3}
 
 def get_gridvals():
-    a = np.arange(1, 10, 1.0)
-    b = np.arange(1, 20, 1.0)
-    gridvals = (a, b)
+    x1 = np.linspace(-np.pi, np.pi, 5)
+    x2 = np.linspace(0.0, np.pi, 5)
+    x3 = np.linspace(0.0, np.pi/2, 5)
+    gridvals = (x1, x2, x3)
     return gridvals
 
 if __name__ == '__main__':
