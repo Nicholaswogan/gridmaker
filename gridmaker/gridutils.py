@@ -188,7 +188,7 @@ class GridInterpolator():
     A class for interpolating data saved from an HDF5 grid of simulation outputs.
 
     This class reads an HDF5 file containing simulation outputs stored on a parameter grid.
-    It provides methods to generate interpolators that can predict values or arrays of 
+    It provides a method to generate interpolators that can predict values or arrays of 
     results at arbitrary points within the grid using `scipy.interpolate.RegularGridInterpolator`.
 
     Parameters
