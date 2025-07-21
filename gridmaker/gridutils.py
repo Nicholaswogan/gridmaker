@@ -16,12 +16,47 @@ def get_inputs(gridvals):
         inputs[:, i] = t.flatten()
     return inputs
 
-def load_completed_hdf5(filename):
-    completed_inds = set()
+def initialize_hdf5(filename):
+    """Initialize the HDF5 file."""
+    with h5py.File(filename, 'w') as f:
+        pass
+
+def save_result_hdf5(filename, index, x, res, grid_shape):
+    """Save a single result to the preallocated HDF5 file."""
+
+    unraveled_idx = np.unravel_index(index, grid_shape)
+
+    with h5py.File(filename, 'a') as f:
+        
+        # Save input parameters
+        if 'inputs' not in f:
+            f.create_dataset('inputs', shape=(np.prod(grid_shape),len(x),), dtype=x.dtype)
+            f['inputs'][:] = np.nan
+        f['inputs'][index] = x
+
+        # Create 'results' group if it doesn't exist
+        if 'results' not in f:
+            f.create_group('results')
+
+        # For each result key, create dataset if necessary, then write data
+        for key, val in res.items():
+            data_shape = grid_shape + val.shape  # accommodate vector outputs
+            if key not in f['results']:
+                f['results'].create_dataset(key, shape=data_shape, dtype=val.dtype)
+            f['results'][key][unraveled_idx] = val
+
+        if 'completed' not in f:
+            f.create_dataset('completed', shape=(np.prod(grid_shape),), dtype='bool')
+            f['completed'][:] = np.zeros(np.prod(grid_shape),dtype='bool')
+        f['completed'][index] = True
+
+def load_completed_mask(filename):
     if os.path.isfile(filename):
         with h5py.File(filename, 'r') as f:
-            completed_inds = set(map(int, f.keys()))
-    return completed_inds
+            if 'completed' not in f:
+                return np.array([], dtype=int)
+            return np.where(f['completed'])[0]
+    return np.array([], dtype=int)
 
 def assign_job(comm, rank, serialized_model, job_iter, inputs):
     try:
@@ -31,33 +66,27 @@ def assign_job(comm, rank, serialized_model, job_iter, inputs):
     except StopIteration:
         comm.send(None, dest=rank, tag=0)
         return False
-    
-def save_result_hdf5(filename, index, x, res):
-    with h5py.File(filename, 'a') as f:
-        group = f.create_group(str(index))
-        group.create_dataset('input', data=x)
-
-        for key, array in res.items():
-            group.create_dataset(key, data=array)
 
 def master(model_func, gridvals, filename, progress_filename):
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
     inputs = get_inputs(gridvals)
+    gridshape = tuple(len(v) for v in gridvals)
 
     serialized_model = pickle.dumps(model_func)
 
-    # Check which calculations are already completed
-    completed_inds = load_completed_hdf5(filename)
-    if completed_inds:
+    # Initialize HDF5 if needed
+    if not os.path.exists(filename):
+        print("Initializing HDF5 output...")
+        initialize_hdf5(filename)
+
+    completed_inds = load_completed_mask(filename)
+    if len(completed_inds) > 0:
         print(f'Calculations completed/total: {len(completed_inds)}/{inputs.shape[0]}.')
-        if len(completed_inds) < inputs.shape[0]:
-            print('Restarting calculations...')
-        else:
+        if len(completed_inds) == inputs.shape[0]:
             print('All calculations completed.')
-    else:
-        with h5py.File(filename, 'w') as f:
-            pass  # Just create the file if it doesn't exist
+        else:
+            print('Restarting calculations...')
 
     # Get inputs that have not yet been computed
     job_indices = [i for i in range(len(inputs)) if i not in completed_inds]
@@ -82,7 +111,7 @@ def master(model_func, gridvals, filename, progress_filename):
             worker_rank = status.Get_source()
 
             # Save the result
-            save_result_hdf5(filename, index, x, res)
+            save_result_hdf5(filename, index, x, res, gridshape)
             
             pbar.update(1)
             log_file.flush()
@@ -165,11 +194,10 @@ class GridInterpolator():
     Parameters
     ----------
     filename : str
-        Path to the HDF5 file containing the grid data.
+        Path to the HDF5 file containing the simulation results.
 
     gridvals : tuple of np.ndarray
-        The parameter values defining each axis of the input grid. The shape of this tuple
-        defines the dimensionality of the grid.
+        The parameter grid values, used to define the interpolation space.
 
     Attributes
     ----------
@@ -179,8 +207,8 @@ class GridInterpolator():
     gridshape : tuple of int
         The shape of the parameter grid, inferred from the lengths of `gridvals`.
 
-    results : list of dict
-        A list of results dictionaries read from the HDF5 file, ordered to match the flattened grid.
+    data : dict of np.ndarray
+        The results from the HDF5 file.
     """
 
     def __init__(self, filename, gridvals):
@@ -194,36 +222,23 @@ class GridInterpolator():
 
         gridvals : tuple of np.ndarray
             The parameter grid values, used to define the interpolation space.
-
-        Notes
-        -----
-        The HDF5 file should have groups named by index (e.g., '0', '1', ...), each containing
-        a 'result' group with datasets corresponding to the keys of the results dictionary.
         """
         self.gridvals = gridvals
-        self.gridshape = tuple([len(a) for a in gridvals])
-        self.results = self._read_hdf5(filename)
+        self.gridshape = tuple(len(a) for a in gridvals)
 
-    def _read_hdf5(self, filename):
-        results = []
         with h5py.File(filename, 'r') as f:
-            # Sort indices numerically to ensure correct order
-            sorted_indices = sorted(f.keys(), key=lambda x: int(x))
-            for index in sorted_indices:
-                group = f[index]
-                res_dict = {key: group[key][()] for key in group if key != 'input'}
-                results.append(res_dict)
-        return results
+            self.data = {}
+            for key in f['results'].keys():
+                self.data[key] = f['results'][key][...]
 
-    def make_array_interpolator(self, key, logspace=False):
+    def make_interpolator(self, key, logspace=False):
         """
-        Create an interpolator for a vector quantity across the parameter grid.
+        Create an interpolator for a grid parameter.
 
         Parameters
         ----------
         key : str
-            The key in the results dictionary for which to create the interpolator.
-            The corresponding value must be an array (e.g., a profile vs. altitude).
+            The key in the `self.data` dictionary for which to create the interpolator.
 
         logspace : bool, optional
             If True, interpolation is performed in log10-space. This is useful for 
@@ -231,75 +246,24 @@ class GridInterpolator():
 
         Returns
         -------
-        interp_arr : function
-            A function that takes a 2D numpy array of shape (n_points, n_dimensions) as input 
-            and returns an interpolated array corresponding to the chosen key.
-        
-        Example
-        -------
-        >>> interp = grid.make_array_interpolator('mixing_ratio', logspace=True)
-        >>> value = interp([[metallicity, temperature]])
+        interp : function
+            Interpolator function, which is called with a tuple of arguments: `interp((2,3,4))`.
         """
-        # Make interpolate for key
-        interps = []
-        for j in range(len(self.results[0][key])):
-            val = np.empty(len(self.results))
-            for i,r in enumerate(self.results):
-                val[i] = r[key][j]
-            if logspace:
-                val = np.log10(np.maximum(val, 1e-9))
-            interps.append(val.reshape(self.gridshape))
-
-        vlist = np.asarray(interps)
-        vlist = np.moveaxis(vlist, 0, -1)
-        rgi = interpolate.RegularGridInterpolator(self.gridvals, vlist)
-
-        def interp_arr(vals):
-            out = rgi(vals)[0]
-            if logspace:
-                out = 10.0**out
-            return out
-        
-        return interp_arr
     
-    def make_value_interpolator(self, key, logspace=False):
-        """
-        Create an interpolator for a scalar quantity across the parameter grid.
+        data = self.data[key]
 
-        Parameters
-        ----------
-        key1 : str
-            The key in the results dictionary for which to create the scalar interpolator.
-            The corresponding value must be a scalar (float or int).
-
-        logspace : bool, optional
-            If True, interpolation is performed in log10-space.
-
-        Returns
-        -------
-        interp_val : function
-            A function that takes a 2D numpy array of shape (n_points, n_dimensions) and 
-            returns interpolated scalar values.
-
-        Example
-        -------
-        >>> interp = grid.make_value_interpolator('surface_temperature', logspace=False)
-        >>> temperature = interp([[metallicity, temperature]])
-        """
-        
-        val = np.empty(len(self.results))
-
-        for i,r in enumerate(self.results):
-            val[i] = r[key]
-
+        # Apply log-space transformation if needed
         if logspace:
-            val = np.log10(np.maximum(val, 1e-9))
-        interp = interpolate.RegularGridInterpolator(self.gridvals, val.reshape(self.gridshape))
+            data = np.log10(np.maximum(data, 2e-38))
 
-        def interp_val(vals):
-            out = interp(vals)[0]
+        # Create the interpolator
+        rgi = interpolate.RegularGridInterpolator(self.gridvals, data)
+
+        def interp(vals):
+            out = rgi(vals)
             if logspace:
-                out = 10.0**out
+                out = 10.0 ** out
             return out
-        
-        return interp_val
+
+        return interp
+    
