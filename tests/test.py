@@ -23,7 +23,7 @@ def get_gridvals():
 
 def test_interpolator():
 
-    g = GridInterpolator('results.h5',get_gridvals())
+    g = GridInterpolator('results.h5')
     interp_res = g.make_interpolator('res')
     interp_a = g.make_interpolator('a')
 

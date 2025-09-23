@@ -21,13 +21,21 @@ def initialize_hdf5(filename):
     with h5py.File(filename, 'w') as f:
         pass
 
-def save_result_hdf5(filename, index, x, res, grid_shape):
+def save_result_hdf5(filename, index, x, res, grid_shape, gridvals):
     """Save a single result to the preallocated HDF5 file."""
 
     unraveled_idx = np.unravel_index(index, grid_shape)
 
     with h5py.File(filename, 'a') as f:
-        
+
+        # Save the gridvals if that has not happened
+        if 'gridvals' not in f:
+            f.create_group('gridvals')
+            for i,gridval in enumerate(gridvals):
+                key = '%i'%i
+                f['gridvals'].create_dataset(key, shape=(len(gridval),), dtype=gridval.dtype)
+                f['gridvals'][key][:] = gridval
+
         # Save input parameters
         if 'inputs' not in f:
             f.create_dataset('inputs', shape=(np.prod(grid_shape),len(x),), dtype=x.dtype)
@@ -79,6 +87,14 @@ def master(model_func, gridvals, filename, progress_filename):
     if not os.path.exists(filename):
         print("Initializing HDF5 output...")
         initialize_hdf5(filename)
+    else:
+        with h5py.File(filename, 'r') as f:
+            if 'gridvals' not in f:
+                raise Exception('The following file lacks the group `gridvals`: '+filename)
+            for i,gridval in enumerate(gridvals):
+                key = '%i'%i
+                if not np.allclose(f['gridvals'][key][:], gridval):
+                    raise Exception('Miss match between the input `gridvals`, and the `gridvals` in '+filename)
 
     completed_inds = load_completed_mask(filename)
     if len(completed_inds) > 0:
@@ -111,7 +127,7 @@ def master(model_func, gridvals, filename, progress_filename):
             worker_rank = status.Get_source()
 
             # Save the result
-            save_result_hdf5(filename, index, x, res, gridshape)
+            save_result_hdf5(filename, index, x, res, gridshape, gridvals)
             
             pbar.update(1)
             log_file.flush()
@@ -211,7 +227,7 @@ class GridInterpolator():
         The results from the HDF5 file.
     """
 
-    def __init__(self, filename, gridvals):
+    def __init__(self, filename):
         """
         Initialize the GridInterpolator by loading data from an HDF5 file.
 
@@ -223,15 +239,24 @@ class GridInterpolator():
         gridvals : tuple of np.ndarray
             The parameter grid values, used to define the interpolation space.
         """
-        self.gridvals = gridvals
-        self.gridshape = tuple(len(a) for a in gridvals)
 
         with h5py.File(filename, 'r') as f:
             self.data = {}
             for key in f['results'].keys():
                 self.data[key] = f['results'][key][...]
+            gridvals = []
+            for i in range(len(f['gridvals'])):
+                key = '%i'%i
+                gridvals.append(f['gridvals'][key][:])
+            gridvals = tuple(gridvals)
 
-    def make_interpolator(self, key, logspace=False):
+        self.gridvals = gridvals
+        self.gridshape = tuple(len(a) for a in gridvals)
+
+        self.min_gridvals = np.array([np.min(a) for a in self.gridvals])
+        self.max_gridvals = np.array([np.max(a) for a in self.gridvals])
+
+    def make_interpolator(self, key, method='linear', linthresh=1.0, logspace=None):
         """
         Create an interpolator for a grid parameter.
 
@@ -252,18 +277,82 @@ class GridInterpolator():
     
         data = self.data[key]
 
-        # Apply log-space transformation if needed
-        if logspace:
-            data = np.log10(np.maximum(data, 2e-38))
+        # for backwards compatibility
+        if logspace == True:
+            method = 'log'
+
+        if method == 'linear':
+            transform = linear_transform
+            untransform = linear_inverse
+        elif method == 'log':
+            transform = log_transform
+            untransform = log_inverse
+        elif method == 'symlog':
+            transform = symlog_transform_func(linthresh)
+            untransform = symlog_inverse_func(linthresh)
+        else:
+            raise ValueError('`method` can not be: '+method)
+
+        # Apply transformation
+        data = transform(data)
 
         # Create the interpolator
         rgi = interpolate.RegularGridInterpolator(self.gridvals, data)
 
         def interp(vals):
-            out = rgi(vals)
-            if logspace:
-                out = 10.0 ** out
-            return out
+            out = rgi(np.clip(vals, a_min=self.min_gridvals, a_max=self.max_gridvals))
+            out = untransform(out)
+            return out[0]
 
         return interp
     
+# Linear transform
+def linear_transform(x):
+    return x
+def linear_inverse(z):
+    return z
+
+# Log transform
+def log_transform(x):
+    return np.log10(np.maximum(x, 2e-38))
+def log_inverse(z):
+    return 10.0**z
+
+# Symmetric log
+def symlog_transform_func(linthresh):
+    """
+    Symmetric log transform with a linear region around zero.
+    linthresh: values with |y| <= linthresh are mapped linearly.
+    """
+    def func(y):
+        y = np.array(y, dtype=float)
+        sign = np.sign(y)
+        mask = np.abs(y) > linthresh
+        out = np.zeros_like(y)
+
+        # Linear region
+        out[~mask] = y[~mask] / linthresh
+
+        # Logarithmic region
+        out[mask] = sign[mask] * (np.log10(np.abs(y[mask]) / linthresh) + 1.0)
+
+        return out
+    return func
+def symlog_inverse_func(linthresh):
+    """
+    Inverse of the symlog transform.
+    """
+    def func(z):
+        z = np.array(z, dtype=float)
+        sign = np.sign(z)
+        mask = np.abs(z) > 1.0
+        out = np.zeros_like(z)
+
+        # Linear region
+        out[~mask] = z[~mask] * linthresh
+
+        # Logarithmic region
+        out[mask] = sign[mask] * 10.0**(np.abs(z[mask]) - 1.0) * linthresh
+
+        return out
+    return func
