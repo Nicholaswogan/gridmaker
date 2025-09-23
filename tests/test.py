@@ -19,7 +19,8 @@ def get_gridvals():
     x2 = np.linspace(0.0, np.pi, 5)
     x3 = np.linspace(0.0, np.pi/2, 5)
     gridvals = (x1, x2, x3)
-    return gridvals
+    gridnames = np.array(['x1','x2','x3'])
+    return gridvals, gridnames
 
 def test_interpolator():
 
@@ -40,9 +41,11 @@ def test_interpolator():
 if __name__ == '__main__':
 
     # Call the driver
+    gridvals, gridnames = get_gridvals()
     make_grid(
         model,
-        gridvals=get_gridvals(), 
+        gridvals=gridvals,
+        gridnames=gridnames, 
         filename='results.h5', 
         progress_filename='progress.log'
     )

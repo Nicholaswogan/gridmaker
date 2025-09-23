@@ -21,7 +21,7 @@ def initialize_hdf5(filename):
     with h5py.File(filename, 'w') as f:
         pass
 
-def check_hdf5(filename, gridvals, common):
+def check_hdf5(filename, gridvals, gridnames, common):
     with h5py.File(filename, 'r') as f:
 
         if 'gridvals' not in f:
@@ -31,13 +31,20 @@ def check_hdf5(filename, gridvals, common):
             if not np.allclose(f['gridvals'][key][:], gridval):
                 raise Exception('Miss match between the input `gridvals`, and the `gridvals` in '+filename)
             
+        if 'gridnames' not in f:
+            raise Exception('The following file lacks `gridnames`: '+filename)
+
+        gridnames_array = np.array(gridnames)
+        if not np.all(f['gridnames'][:].astype(gridnames_array.dtype) == gridnames_array):
+            raise Exception('Miss match between the input `gridnames`, and the `gridnames` in '+filename)
+            
         if 'common' not in f:
             raise Exception('The following file lacks the group `common`: '+filename)
         for key, val in common.items():
             if not np.allclose(f['common'][key][:], val):
                 raise Exception('Miss match between the input `common`, and the `common` in '+filename)
 
-def save_result_hdf5(filename, index, x, res, grid_shape, gridvals, common):
+def save_result_hdf5(filename, index, x, res, grid_shape, gridvals, gridnames, common):
     """Save a single result to the preallocated HDF5 file."""
 
     unraveled_idx = np.unravel_index(index, grid_shape)
@@ -51,6 +58,11 @@ def save_result_hdf5(filename, index, x, res, grid_shape, gridvals, common):
                 key = '%i'%i
                 f['gridvals'].create_dataset(key, shape=(len(gridval),), dtype=gridval.dtype)
                 f['gridvals'][key][:] = gridval
+
+        if 'gridnames' not in f:
+            gridnames_array = np.array(gridnames)
+            f.create_dataset('gridnames', shape=(len(gridnames_array),), dtype=h5py.string_dtype())
+            f['gridnames'][:] = gridnames_array
 
         if 'common' not in f:
             f.create_group('common')
@@ -97,7 +109,11 @@ def assign_job(comm, rank, serialized_model, job_iter, inputs):
         comm.send(None, dest=rank, tag=0)
         return False
 
-def master(model_func, gridvals, filename, progress_filename, common):
+def master(model_func, gridvals, gridnames, filename, progress_filename, common):
+
+    if len(gridvals) != len(gridnames):
+        raise ValueError('`gridvals` and `gridnames` have incompatable shapes.')
+
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
     inputs = get_inputs(gridvals)
@@ -110,7 +126,7 @@ def master(model_func, gridvals, filename, progress_filename, common):
         print("Initializing HDF5 output...")
         initialize_hdf5(filename)
     else:
-        check_hdf5(filename, gridvals, common)
+        check_hdf5(filename, gridvals, gridnames, common)
 
     completed_inds = load_completed_mask(filename)
     if len(completed_inds) > 0:
@@ -143,7 +159,7 @@ def master(model_func, gridvals, filename, progress_filename, common):
             worker_rank = status.Get_source()
 
             # Save the result
-            save_result_hdf5(filename, index, x, res, gridshape, gridvals, common)
+            save_result_hdf5(filename, index, x, res, gridshape, gridvals, gridnames, common)
             
             pbar.update(1)
             log_file.flush()
@@ -172,7 +188,7 @@ def worker():
         # Send the results to the master process
         comm.send((index, x, res), dest=0, tag=2)
 
-def make_grid(model_func, gridvals, filename, progress_filename, common={}):
+def make_grid(model_func, gridvals, gridnames, filename, progress_filename, common={}):
     """
     Run a parallel grid computation using MPI, saving results to an HDF5 file.
 
@@ -190,6 +206,9 @@ def make_grid(model_func, gridvals, filename, progress_filename, common={}):
     gridvals : tuple of 1D numpy arrays
         Defines the parameter grid. Each array in the tuple represents the discrete 
         values for one dimension of the parameter space.
+
+    gridnames : 1D numpy array
+        Names of the variables in the grid.
 
     filename : str
         Path to the HDF5 file where computed results will be stored. The file will contain
@@ -214,7 +233,7 @@ def make_grid(model_func, gridvals, filename, progress_filename, common={}):
 
     if rank == 0:
         # Master process
-        master(model_func, gridvals, filename, progress_filename, common)
+        master(model_func, gridvals, gridnames, filename, progress_filename, common)
     else:
         # Worker process
         worker()
