@@ -21,7 +21,23 @@ def initialize_hdf5(filename):
     with h5py.File(filename, 'w') as f:
         pass
 
-def save_result_hdf5(filename, index, x, res, grid_shape, gridvals):
+def check_hdf5(filename, gridvals, common):
+    with h5py.File(filename, 'r') as f:
+
+        if 'gridvals' not in f:
+            raise Exception('The following file lacks the group `gridvals`: '+filename)
+        for i,gridval in enumerate(gridvals):
+            key = '%i'%i
+            if not np.allclose(f['gridvals'][key][:], gridval):
+                raise Exception('Miss match between the input `gridvals`, and the `gridvals` in '+filename)
+            
+        if 'common' not in f:
+            raise Exception('The following file lacks the group `common`: '+filename)
+        for key, val in common.items():
+            if not np.allclose(f['common'][key][:], val):
+                raise Exception('Miss match between the input `common`, and the `common` in '+filename)
+
+def save_result_hdf5(filename, index, x, res, grid_shape, gridvals, common):
     """Save a single result to the preallocated HDF5 file."""
 
     unraveled_idx = np.unravel_index(index, grid_shape)
@@ -35,6 +51,12 @@ def save_result_hdf5(filename, index, x, res, grid_shape, gridvals):
                 key = '%i'%i
                 f['gridvals'].create_dataset(key, shape=(len(gridval),), dtype=gridval.dtype)
                 f['gridvals'][key][:] = gridval
+
+        if 'common' not in f:
+            f.create_group('common')
+            for key, val in common.items():
+                f['common'].create_dataset(key, shape=val.shape, dtype=val.dtype)
+                f['common'][key][:] = val
 
         # Save input parameters
         if 'inputs' not in f:
@@ -75,7 +97,7 @@ def assign_job(comm, rank, serialized_model, job_iter, inputs):
         comm.send(None, dest=rank, tag=0)
         return False
 
-def master(model_func, gridvals, filename, progress_filename):
+def master(model_func, gridvals, filename, progress_filename, common):
     comm = MPI.COMM_WORLD
     size = comm.Get_size()
     inputs = get_inputs(gridvals)
@@ -88,13 +110,7 @@ def master(model_func, gridvals, filename, progress_filename):
         print("Initializing HDF5 output...")
         initialize_hdf5(filename)
     else:
-        with h5py.File(filename, 'r') as f:
-            if 'gridvals' not in f:
-                raise Exception('The following file lacks the group `gridvals`: '+filename)
-            for i,gridval in enumerate(gridvals):
-                key = '%i'%i
-                if not np.allclose(f['gridvals'][key][:], gridval):
-                    raise Exception('Miss match between the input `gridvals`, and the `gridvals` in '+filename)
+        check_hdf5(filename, gridvals, common)
 
     completed_inds = load_completed_mask(filename)
     if len(completed_inds) > 0:
@@ -127,7 +143,7 @@ def master(model_func, gridvals, filename, progress_filename):
             worker_rank = status.Get_source()
 
             # Save the result
-            save_result_hdf5(filename, index, x, res, gridshape, gridvals)
+            save_result_hdf5(filename, index, x, res, gridshape, gridvals, common)
             
             pbar.update(1)
             log_file.flush()
@@ -156,7 +172,7 @@ def worker():
         # Send the results to the master process
         comm.send((index, x, res), dest=0, tag=2)
 
-def make_grid(model_func, gridvals, filename, progress_filename):
+def make_grid(model_func, gridvals, filename, progress_filename, common={}):
     """
     Run a parallel grid computation using MPI, saving results to an HDF5 file.
 
@@ -183,6 +199,10 @@ def make_grid(model_func, gridvals, filename, progress_filename):
     progress_filename : str
         Path to the text file where progress updates (from the master process) will be logged.
 
+    common: dict of numpy arrays
+        Dictionary of arrays that will be saved in the HDF5 file. Sometimes saved results will
+        share a common axis that might want to be saved alongside the data without repetition.
+
     Notes
     -----
     - This function must be run with an MPI launcher (e.g., `mpiexec -n N python script.py`).
@@ -194,7 +214,7 @@ def make_grid(model_func, gridvals, filename, progress_filename):
 
     if rank == 0:
         # Master process
-        master(model_func, gridvals, filename, progress_filename)
+        master(model_func, gridvals, filename, progress_filename, common)
     else:
         # Worker process
         worker()
@@ -249,7 +269,11 @@ class GridInterpolator():
                 key = '%i'%i
                 gridvals.append(f['gridvals'][key][:])
             gridvals = tuple(gridvals)
-
+            common = {}
+            for key in f['common'].keys():
+                common[key] = f['common'][key][:]
+            
+        self.common = common
         self.gridvals = gridvals
         self.gridshape = tuple(len(a) for a in gridvals)
 
